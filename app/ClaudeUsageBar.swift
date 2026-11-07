@@ -164,6 +164,7 @@ struct PaceTooltip: View {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
+    let popoverLayout = PopoverLayout()
     var usageManager: UsageManager!
     var statusManager: StatusManager!
     var updateManager: UpdateManager!
@@ -196,13 +197,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Create popover
         popover = NSPopover()
-        // Initial guess; SwiftUI's intrinsic size (capped at 600) will drive the actual size.
+        // Initial guess; SwiftUI's intrinsic size (capped by popoverLayout.maxHeight,
+        // which tracks the screen's available height) drives the actual size.
         popover.contentSize = NSSize(width: 360, height: 320)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: UsageView(
             usageManager: usageManager,
             statusManager: statusManager,
-            updateManager: updateManager
+            updateManager: updateManager,
+            popoverLayout: popoverLayout
         ))
 
         // Appearance preference: "system" (default) tracks the macOS light/dark
@@ -404,6 +407,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.usageManager.updatePercentages()
             }
 
+            fitPopoverToScreen(below: button)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
 
             // Add event monitor to detect clicks outside the popover
@@ -412,6 +416,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.closePopover()
                 }
             }
+        }
+    }
+
+    /// Caps the popover's height to the room between the status item and the
+    /// bottom of the screen's visible area (which excludes the Dock), so it
+    /// never grows taller than the screen allows and gets pushed up off the top.
+    private func fitPopoverToScreen(below button: NSStatusBarButton) {
+        guard let window = button.window,
+              let screen = window.screen ?? NSScreen.main else { return }
+
+        // The status item's window sits in the menu bar; its bottom edge is
+        // where the popover hangs from. Leave room for the popover's arrow
+        // and a small gap above the Dock / screen edge.
+        let arrowAndMargin: CGFloat = 32
+        let available = window.frame.minY - screen.visibleFrame.minY - arrowAndMargin
+        let capped = min(PopoverLayout.absoluteMaxHeight, max(PopoverLayout.minHeight, available))
+
+        if popoverLayout.maxHeight != capped {
+            popoverLayout.maxHeight = capped
+        }
+        // Clamp the current size too, so the popover opens at a size that fits
+        // instead of opening too tall and then shrinking (or being shifted up).
+        if popover.contentSize.height > capped {
+            popover.contentSize = NSSize(width: popover.contentSize.width, height: capped)
         }
     }
 
@@ -1761,10 +1789,21 @@ private struct ContentHeightKey: PreferenceKey {
     }
 }
 
+/// Tallest the popover may be. Recomputed by AppDelegate each time the popover
+/// opens from the space between the menu bar and the bottom of the visible
+/// screen area (above the Dock). A fixed cap overflowed on small displays:
+/// AppKit shifts a too-tall popover upward, pushing its top off the screen.
+final class PopoverLayout: ObservableObject {
+    static let absoluteMaxHeight: CGFloat = 600
+    static let minHeight: CGFloat = 200
+    @Published var maxHeight: CGFloat = PopoverLayout.absoluteMaxHeight
+}
+
 struct UsageView: View {
     @ObservedObject var usageManager: UsageManager
     @ObservedObject var statusManager: StatusManager
     @ObservedObject var updateManager: UpdateManager
+    @ObservedObject var popoverLayout: PopoverLayout
     @State private var sessionCookieInput: String = ""
     @State private var showingCookieInput: Bool = false
     @State private var showingSettings: Bool = false
@@ -1775,8 +1814,6 @@ struct UsageView: View {
     @AppStorage("reset_time_style") private var resetTimeStyle: String = "countdown"
     @State private var now = Date()
     private let minuteTicker = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-
-    private let maxPopupHeight: CGFloat = 600
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -1789,7 +1826,7 @@ struct UsageView: View {
                         }
                     )
             }
-            .frame(width: 360, height: min(max(measuredHeight, 100), maxPopupHeight))
+            .frame(width: 360, height: min(max(measuredHeight, 100), popoverLayout.maxHeight))
             // Dark: light scrim over the native material — between fully native
             // (too transparent) and the v1.3.2 0.62 scrim (read as "too dark").
             // TEST VALUE on ClaudeUsageBar only; CodexUsageBar stays fully native.
